@@ -1,0 +1,32 @@
+image: netbsd/9.x
+
+packages:
+  - gmake
+  - automake
+  - autoconf
+  - openssl
+  - lzo
+  - miniupnpc
+  - readline
+  - gtexinfo
+
+environment:
+  CFLAGS: -I/usr/pkg/include -L/usr/pkg/lib
+
+sources:
+  - https://github.com/hg/tinc#1.1
+
+tasks:
+  - configure: |
+      cd tinc
+      autoreconf -fsi
+      ./configure --with-miniupnpc
+
+  - build: |
+      cd tinc
+      gmake -j$(sysctl -n hw.ncpu)
+
+  - test: |
+      cd tinc
+      export LD_LIBRARY_PATH=/usr/pkg/lib
+      timeout 20m gmake check-recursive VERBOSE=1
