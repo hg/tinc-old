@@ -14,7 +14,23 @@ on:
       - synchronize
 
 jobs:
-  test-linux:
+  code-style:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Install Artistic Style
+        run: sudo apt-get install -y astyle
+
+      - name: Check code formatting
+        run: |
+          shopt -s globstar
+          ! astyle --options=.astylerc --dry-run --formatted ./**/*.[ch] | grep '^Formatted'
+
+  linux:
     strategy:
       matrix:
         os: [ubuntu-18.04, ubuntu-20.04]
@@ -29,8 +45,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
 
-      - name: Install Artistic Style and build deps
+      - name: Install build deps
         run: >
           sudo apt-get install -y --no-install-{recommends,suggests}
           zlib1g-dev
@@ -39,8 +57,7 @@ jobs:
           libreadline-dev
           libminiupnpc-dev
           libvdeplug-dev
-          astyle
-          socket
+          netcat
 
       - name: Install OpenSSL
         run: sudo apt-get install -y libssl-dev
@@ -55,30 +72,33 @@ jobs:
           --enable-{miniupnpc,uml,vde}
           ${{ matrix.legacy_protocol }}
 
-      - name: Check code formatting
-        run: make check-style
-
       - name: Compile project
         run: make -j$(nproc)
 
       - name: Run tests
         # root is required for some tests
-        run: sudo make check-recursive
+        run: sudo make check-recursive VERBOSE=1
         timeout-minutes: 20
+
+      - name: Archive test results
+        run: sudo tar -caf test-results.tar.gz test/*.log test/*.test.*/
+        if: always()
 
       - name: Upload test results
         uses: actions/upload-artifact@v2
         with:
           name: tests_${{ matrix.os }}_${{ matrix.compiler }}
-          path: test/test-suite.log
-        if: failure()
+          path: test-results.tar.gz
+        if: always()
 
-  build-windows:
+  windows:
     runs-on: windows-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
 
       - name: Install msys2
         uses: msys2/setup-msys2@v2
@@ -110,9 +130,9 @@ jobs:
         shell: msys2 {0}
         run: ./src/tincd --version
 
-  release-deb:
+  deb-build:
     if: startsWith(github.ref, 'refs/tags/release-')
-    needs: test-linux
+    needs: linux
 
     strategy:
       matrix:
@@ -123,10 +143,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
 
       - name: Install build deps
         run: >
           sudo apt-get install -y --no-install-{recommends,suggests}
+          devscripts
+          git-buildpackage
           dh-make
           texinfo
           libssl-dev
@@ -138,43 +162,63 @@ jobs:
       - name: Run autoreconf
         run: autoreconf -fsi
 
-      - name: Run ./configure
-        run: >
-          ./configure 
-          --prefix=/usr
-          --sbindir=/usr/sbin
-          --sysconfdir=/etc
-          --localstatedir=/var
-          --with-systemd=/usr/lib/systemd/system
-
       - name: Prepare debian directory
-        run: >
-          dh_make
-          --yes
-          --single
-          --createorig
-          --copyright gpl2
-          --packagename "tinc_$(git describe --tags --always | sed 's/release-//')-${{ matrix.os }}"
-        env:
-          DEBFULLNAME: Automated Builds
+        run: bash .github/workflows/deb/prepare
 
       - name: Build deb package
         run: dpkg-buildpackage -d -us -uc
 
+      - name: Upload packages
+        uses: actions/upload-artifact@v2
+        with:
+          name: deb-package-${{ matrix.os }}
+          path: "*.deb"
+
+  deb-publish:
+    needs: deb-build
+
+    strategy:
+      matrix:
+        os: ["ubuntu-18.04", ubuntu-20.04]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Download built packages
+        uses: actions/download-artifact@v2
+        with:
+          name: deb-package-${{ matrix.os }}
+
+      - name: Install package
+        run: apt install -y ./*.deb
+
+      - name: Prepare tinc configs
+        run: |
+          set -eu
+          sudo mkdir -p /etc/tinc/test/hosts
+          sudo tinc -b -n test generate-ed25519-keys
+          echo "Name test" | sudo tee /etc/tinc/test/tinc.conf
+
+      - name: Enable and start tincd
+        run: |
+          sudo systemctl start tinc@test
+          sudo tinc -n test dump reachable nodes
+
       - name: Publish deb package
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            ../*.deb
+          files: "*.deb"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  test-macos:
+  macos:
     runs-on: macos-10.15
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
 
       - name: Install dependencies
         run: brew install coreutils netcat automake lzo miniupnpc
@@ -192,12 +236,16 @@ jobs:
         run: make -j$(sysctl -n hw.ncpu)
 
       - name: Run tests
-        run: make check-recursive
+        run: make check-recursive VERBOSE=1
         timeout-minutes: 20
+
+      - name: Archive test results
+        run: sudo tar -caf test-results.tar.gz test/*.log test/*.test.*/
+        if: always()
 
       - name: Upload test results
         uses: actions/upload-artifact@v2
         with:
           name: tests_${{ runner.os }}
-          path: test/test-suite.log
-        if: failure()
+          path: test-results.tar.gz
+        if: always()
