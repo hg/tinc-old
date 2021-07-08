@@ -22,13 +22,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install Artistic Style
-        run: sudo apt-get install -y astyle
+      - name: Install code formatting tools
+        run: |
+          sudo apt-get install -y astyle shellcheck
+          curl -o ~/shfmt -L 'https://github.com/mvdan/sh/releases/download/v3.3.0/shfmt_v3.3.0_linux_amd64'
+          chmod 755 ~/shfmt
 
       - name: Check code formatting
         run: |
           shopt -s globstar
           ! astyle --options=.astylerc --dry-run --formatted ./**/*.[ch] | grep '^Formatted'
+
+      - name: Check test scripts formatting
+        run: ~/shfmt -d -i 2 -s test/testlib.sh.in test/*.test
 
   linux:
     strategy:
@@ -57,7 +63,9 @@ jobs:
           libreadline-dev
           libminiupnpc-dev
           libvdeplug-dev
+          texinfo
           netcat
+          procps
 
       - name: Install OpenSSL
         run: sudo apt-get install -y libssl-dev
@@ -77,22 +85,26 @@ jobs:
 
       - name: Run tests
         # root is required for some tests
-        run: sudo make check-recursive VERBOSE=1
-        timeout-minutes: 20
+        run: while sudo make check-recursive VERBOSE=1; do true; done; exit 1
 
       - name: Archive test results
-        run: sudo tar -caf test-results.tar.gz test/*.log test/*.test.*/
+        run: sudo tar -caf test-results.tar.gz test/
         if: always()
 
       - name: Upload test results
         uses: actions/upload-artifact@v2
         with:
-          name: tests_${{ matrix.os }}_${{ matrix.compiler }}
+          name: tests_${{ github.job }}
           path: test-results.tar.gz
         if: always()
 
   windows:
     runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        legacy_protocol: ["", --disable-legacy-protocol]
 
     steps:
       - name: Checkout code
@@ -114,21 +126,31 @@ jobs:
             mingw-w64-x86_64-ncurses
             mingw-w64-x86_64-miniupnpc
             git
+            netcat
+            procps
 
       - name: Build the project
         shell: msys2 {0}
         run: |
           autoreconf -fsi
-          ./configure --with-curses-include=/mingw64/include/ncurses --disable-readline
+          ./configure --enable-miniupnpc --disable-readline --with-curses-include=/mingw64/include/ncurses ${{ matrix.legacy_protocol }}
           make -j$(nproc)
 
-      - name: Check that tinc can be started
+      - name: Run tests
         shell: msys2 {0}
-        run: ./src/tinc --version
+        run: while make check-recursive VERBOSE=1; do true; done; exit 1
 
-      - name: Check that tincd can be started
+      - name: Archive test results
         shell: msys2 {0}
-        run: ./src/tincd --version
+        run: tar -caf test-results.tar.gz test/
+        if: always()
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v2
+        with:
+          name: tests_${{ github.job }}
+          path: test-results.tar.gz
+        if: always()
 
   deb-build:
     if: startsWith(github.ref, 'refs/tags/release-')
@@ -214,6 +236,11 @@ jobs:
   macos:
     runs-on: macos-10.15
 
+    strategy:
+      fail-fast: false
+      matrix:
+        legacy_protocol: ["", --disable-legacy-protocol]
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
@@ -231,21 +258,21 @@ jobs:
           ./configure
           --with-openssl=/usr/local/opt/openssl@1.1
           --enable-{tunemu,miniupnpc}
+          ${{ matrix.legacy_protocol }}
 
       - name: Compile application
         run: make -j$(sysctl -n hw.ncpu)
 
       - name: Run tests
-        run: make check-recursive VERBOSE=1
-        timeout-minutes: 20
+        run: while make check-recursive VERBOSE=1; do true; done; exit 1
 
       - name: Archive test results
-        run: sudo tar -caf test-results.tar.gz test/*.log test/*.test.*/
+        run: sudo tar -caf test-results.tar.gz test/
         if: always()
 
       - name: Upload test results
         uses: actions/upload-artifact@v2
         with:
-          name: tests_${{ runner.os }}
+          name: tests_${{ github.job }}
           path: test-results.tar.gz
         if: always()
